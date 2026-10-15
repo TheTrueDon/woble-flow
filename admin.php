@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-function adminPage(PDO $pdo, string $users, string $groupsTable, string $members, string $moduleRegistry, string $moduleFrontends, string $groupFrontends, array $admin): never
+function adminPage(PDO $pdo, string $users, string $groupsTable, string $members, string $moduleRegistry, string $moduleFrontends, string $groupFrontends, string $dashboardPermissions, array $admin): never
 {
     $tab = (($_GET['tab'] ?? 'users') === 'groups') ? 'groups' : 'users';
     $error = '';
@@ -36,6 +36,9 @@ function adminPage(PDO $pdo, string $users, string $groupsTable, string $members
                             $firstFrontend = $front->fetchColumn();
                             if ($firstFrontend !== false) $assign->execute([$newGroupId,(int)$moduleId,(int)$firstFrontend]);
                         }
+                        $dashboards=$pdo->query("SELECT id,slug FROM $moduleRegistry")->fetchAll();
+                        $permission=$pdo->prepare("INSERT IGNORE INTO $dashboardPermissions(group_id,module_id,enabled) VALUES(?,?,0)");
+                        foreach($dashboards as $module){if(is_file(__DIR__.'/private/modules/'.$module['slug'].'/dashboard.php'))$permission->execute([$newGroupId,(int)$module['id']]);}
                     }
                     $_SESSION['admin_flash'] = 'Gruppe gespeichert.';
                     go('index.php?page=admin&tab=groups');

@@ -26,6 +26,65 @@ function moduleNavigation(PDO $pdo,string $globalPrefix,int $userId,string $user
     return $items;
 }
 
+function dashboardModulesForUser(PDO $pdo,string $members,string $registry,string $permissions,int $userId):array
+{
+    $stmt=$pdo->prepare("SELECT DISTINCT m.id,m.slug,m.title,m.version,m.db_prefix FROM $registry m JOIN $permissions p ON p.module_id=m.id AND p.enabled=1 JOIN $members gm ON gm.group_id=p.group_id WHERE gm.user_id=? ORDER BY m.title");
+    $stmt->execute([$userId]);$modules=[];$root=__DIR__.'/private/modules';
+    foreach($stmt->fetchAll() as $module){
+        $path=$root.'/'.$module['slug'].'/dashboard.php';
+        if(is_file($path))$modules[]=$module;
+    }
+    return $modules;
+}
+
+function runDashboard(PDO $pdo,string $globalPrefix,string $users,string $members,string $groups,string $registry,string $permissions,string $settings,string $tiles,array $user):never
+{
+    $allowed=dashboardModulesForUser($pdo,$members,$registry,$permissions,(int)$user['id']);
+    $allowedIds=array_map(static fn($module)=>(int)$module['id'],$allowed);
+    $message='';$error='';
+    if($_SERVER['REQUEST_METHOD']==='POST'){
+        csrf();$submitted=$_POST['modules']??[];if(!is_array($submitted))$submitted=[];
+        $selected=array_values(array_unique(array_map('intval',$submitted)));
+        $selected=array_values(array_filter($selected,static fn($id)=>in_array($id,$allowedIds,true)));
+        try{
+            $pdo->beginTransaction();
+            $stmt=$pdo->prepare("INSERT INTO $settings(user_id) VALUES(?) ON DUPLICATE KEY UPDATE customized_at=CURRENT_TIMESTAMP");$stmt->execute([(int)$user['id']]);
+            $stmt=$pdo->prepare("DELETE FROM $tiles WHERE user_id=?");$stmt->execute([(int)$user['id']]);
+            $insert=$pdo->prepare("INSERT INTO $tiles(user_id,module_id,position) VALUES(?,?,?)");
+            foreach($selected as $position=>$moduleId)$insert->execute([(int)$user['id'],$moduleId,$position]);
+            $pdo->commit();go('index.php?page=dashboard');
+        }catch(Throwable $exception){if($pdo->inTransaction())$pdo->rollBack();$error='Die Dashboard-Auswahl konnte nicht gespeichert werden.';}
+    }
+    $stmt=$pdo->prepare("SELECT 1 FROM $settings WHERE user_id=?");$stmt->execute([(int)$user['id']]);$customized=(bool)$stmt->fetchColumn();
+    $selectedIds=$allowedIds;
+    if($customized){
+        $stmt=$pdo->prepare("SELECT module_id FROM $tiles WHERE user_id=? ORDER BY position,module_id");$stmt->execute([(int)$user['id']]);$selectedIds=array_map('intval',$stmt->fetchAll(PDO::FETCH_COLUMN));
+    }
+    $byId=[];foreach($allowed as $module)$byId[(int)$module['id']]=$module;
+    $body='<section class="dashboard-intro"><div><div class="eyebrow">DEIN ARBEITSBEREICH</div><h1>Dashboard</h1><p class="lead">Wichtige Ansichten deiner freigeschalteten Module auf einen Blick.</p></div><a class="button secondary" href="index.php?page=dashboard&edit=1">Kacheln auswählen</a></section>';
+    if($error)$body.='<div class="notice error">'.e($error).'</div>';
+    if(isset($_GET['edit'])){
+        $body.='<section class="panel dashboard-settings"><h2>Meine Dashboard-Kacheln</h2><p class="muted">Du kannst nur Kacheln auswählen, die für mindestens eine deiner Gruppen freigegeben sind.</p>';
+        if(!$allowed)$body.='<div class="notice">Für deine Benutzergruppen sind noch keine Dashboard-Kacheln freigeschaltet.</div>';
+        else{
+            $body.='<form method="post" action="index.php?page=dashboard&edit=1"><input type="hidden" name="csrf" value="'.e(tok()).'">';
+            foreach($allowed as $module){$id=(int)$module['id'];$checked=in_array($id,$selectedIds,true)?' checked':'';$body.='<label class="dashboard-option"><input type="checkbox" name="modules[]" value="'.$id.'"'.$checked.'><span><strong>'.e($module['title']).'</strong><small>Dashboard-Kachel</small></span></label>';}
+            $body.='<div class="dashboard-actions"><button class="button">Auswahl speichern</button><a class="cancel" href="index.php?page=dashboard">Zurück zum Dashboard</a></div></form>';
+        }
+        $body.='</section>';
+    }else{
+        $body.='<div class="dashboard-grid">';$visible=0;
+        foreach($selectedIds as $moduleId){if(!isset($byId[$moduleId]))continue;$module=$byId[$moduleId];$directory=__DIR__.'/private/modules/'.$module['slug'];$ctx=moduleContext($pdo,$globalPrefix,['slug'=>$module['slug'],'name'=>$module['title'],'version'=>$module['version'],'db_prefix'=>$module['db_prefix']],$user);$ctx->moduleDir=$directory;$ctx->assetUrl='index.php?page=module_asset&slug='.rawurlencode($module['slug']).'&asset=';
+            $render=static function(string $__path,object $moduleContext):string{ob_start();try{include $__path;return (string)ob_get_clean();}catch(Throwable $exception){ob_end_clean();throw $exception;}};
+            try{$content=$render($directory.'/dashboard.php',$ctx);}catch(Throwable $exception){$content='<p class="widget-error">Diese Dashboard-Kachel konnte nicht geladen werden.</p>';}
+            $body.='<article class="dashboard-card"><header><h2>'.e($module['title']).'</h2><a href="index.php?page=module&amp;slug='.e($module['slug']).'">Modul öffnen <span aria-hidden="true">→</span></a></header><div class="dashboard-card-content">'.$content.'</div></article>';$visible++;
+        }
+        $body.='</div>';
+        if($visible===0)$body.='<section class="panel dashboard-empty"><div class="empty-icon">▦</div><h2>Dein Dashboard ist noch leer</h2><p class="muted">Wähle die für dich freigeschalteten Modulkacheln aus. Wenn keine Kacheln verfügbar sind, kann ein Administrator sie im Modulmanager für deine Gruppe freigeben.</p><a class="button" href="index.php?page=dashboard&edit=1">Kacheln auswählen</a></section>';
+    }
+    $GLOBALS['currentPage']='dashboard';view('Dashboard',$body,true);
+}
+
 function moduleManifest(string $directory):array
 {
     $path=$directory.'/module.json';
@@ -133,7 +192,7 @@ function moduleContext(PDO $pdo,string $globalPrefix,array $manifest,array $user
     ];
 }
 
-function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $groups,string $registry,string $frontends,string $groupFrontends,array $user):never
+function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $groups,string $registry,string $frontends,string $groupFrontends,string $dashboardPermissions,string $dashboardTiles,array $user):never
 {
     $moduleRoot=__DIR__.'/private/modules';
     if(!is_dir($moduleRoot))@mkdir($moduleRoot,0700,true);
@@ -174,6 +233,10 @@ function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $group
                         $groupsList=$pdo->query("SELECT id FROM $groups")->fetchAll(PDO::FETCH_COLUMN);
                         $assign=$pdo->prepare("INSERT INTO $groupFrontends(group_id,module_id,frontend_id) VALUES(?,?,?)");
                         foreach($groupsList as $groupId)$assign->execute([(int)$groupId,$moduleId,$default]);
+                        if(is_file($target.'/dashboard.php')){
+                            $permission=$pdo->prepare("INSERT INTO $dashboardPermissions(group_id,module_id,enabled) VALUES(?,?,0)");
+                            foreach($groupsList as $groupId)$permission->execute([(int)$groupId,$moduleId]);
+                        }
                         $pdo->commit();
                     }catch(Throwable $exception){
                         if($pdo->inTransaction())$pdo->rollBack();
@@ -206,6 +269,14 @@ function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $group
                     $valid=array_column($manifest['frontends'],'id');$default=(int)$manifest['frontends'][0]['id'];
                     $assign=$pdo->prepare("INSERT INTO $groupFrontends(group_id,module_id,frontend_id) VALUES(?,?,?)");
                     foreach($pdo->query("SELECT id FROM $groups")->fetchAll(PDO::FETCH_COLUMN) as $groupId){$old=$previous[(int)$groupId]??$default;$assign->execute([(int)$groupId,$moduleId,in_array($old,$valid,true)?$old:$default]);}
+                    $allGroups=$pdo->query("SELECT id FROM $groups")->fetchAll(PDO::FETCH_COLUMN);
+                    if(is_file($target.'/dashboard.php')){
+                        $permission=$pdo->prepare("INSERT IGNORE INTO $dashboardPermissions(group_id,module_id,enabled) VALUES(?,?,0)");
+                        foreach($allGroups as $groupId)$permission->execute([(int)$groupId,$moduleId]);
+                    }else{
+                        $stmt=$pdo->prepare("DELETE FROM $dashboardPermissions WHERE module_id=?");$stmt->execute([$moduleId]);
+                        $stmt=$pdo->prepare("DELETE FROM $dashboardTiles WHERE module_id=?");$stmt->execute([$moduleId]);
+                    }
                     $pdo->commit();
                     try{removeModuleTree($backup);}catch(Throwable $ignored){}
                 }catch(Throwable $exception){
@@ -240,8 +311,21 @@ function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $group
                 foreach($groupIds as $groupId){$choice=(int)($submitted[$groupId]??$valid[0]);if(!in_array($choice,$valid,true))$choice=$valid[0];$insert->execute([$groupId,$moduleId,$choice]);}
                 $_SESSION['module_flash']='Frontend-Auswahl je Benutzergruppe gespeichert.';
                 go('index.php?page=modules');
+            }elseif($action==='save_dashboard_permissions'){
+                $moduleId=(int)($_POST['module_id']??0);$target=$moduleRoot.'/';
+                $stmt=$pdo->prepare("SELECT slug FROM $registry WHERE id=?");$stmt->execute([$moduleId]);$slug=$stmt->fetchColumn();
+                if($slug===false||!is_file($target.$slug.'/dashboard.php'))throw new RuntimeException('Dieses Modul stellt keine dashboard.php bereit.');
+                $submitted=$_POST['dashboard_group']??[];if(!is_array($submitted))$submitted=[];
+                $allGroups=array_map('intval',$pdo->query("SELECT id FROM $groups ORDER BY id")->fetchAll(PDO::FETCH_COLUMN));
+                $pdo->beginTransaction();
+                $upsert=$pdo->prepare("INSERT INTO $dashboardPermissions(group_id,module_id,enabled) VALUES(?,?,?) ON DUPLICATE KEY UPDATE enabled=VALUES(enabled)");
+                foreach($allGroups as $groupId)$upsert->execute([$groupId,$moduleId,isset($submitted[$groupId])?1:0]);
+                $pdo->commit();
+                $_SESSION['module_flash']='Dashboard-Freigaben je Benutzergruppe gespeichert.';
+                go('index.php?page=modules');
             }else throw new RuntimeException('Unbekannte Modulaktion.');
         }catch(Throwable $exception){
+            if($pdo->inTransaction())$pdo->rollBack();
             if(isset($stage)&&is_dir($stage))removeModuleTree($stage);
             $error=$exception instanceof JsonException?'module.json ist ungültiges JSON.':$exception->getMessage();
         }
@@ -249,7 +333,7 @@ function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $group
 
     $modules=$pdo->query("SELECT id,slug,title,version,db_prefix,installed_at FROM $registry ORDER BY title")->fetchAll();
     $groupsList=$pdo->query("SELECT id,name FROM $groups ORDER BY name")->fetchAll();
-    $body='<section class="panel"><div class="eyebrow">ADMINISTRATION</div><h1>Modulmanager</h1><p class="lead">Installiere vertrauenswürdige ZIP-Module, aktualisiere sie durch erneutes Hochladen und verwalte das Frontend je Benutzergruppe.</p><div class="notice warn"><b>Hinweis:</b> PHP-Module führen Servercode mit den Rechten dieser Anwendung aus. Installiere nur Pakete aus vertrauenswürdiger Quelle.</div>'.($flash?'<div class="notice success">'.e($flash).'</div>':'').($error?'<div class="notice error">'.e($error).'</div>':'');
+    $body='<section class="panel"><div class="eyebrow">ADMINISTRATION</div><h1>Modulmanager</h1><p class="lead">Installiere vertrauenswürdige ZIP-Module, aktualisiere sie durch erneutes Hochladen und verwalte Frontends sowie Dashboard-Freigaben je Benutzergruppe.</p><div class="notice warn"><b>Hinweis:</b> PHP-Module führen Servercode mit den Rechten dieser Anwendung aus. Installiere nur Pakete aus vertrauenswürdiger Quelle.</div>'.($flash?'<div class="notice success">'.e($flash).'</div>':'').($error?'<div class="notice error">'.e($error).'</div>':'');
     $body.='<section class="subpanel module-upload"><h2>Modul installieren oder aktualisieren</h2><form method="post" enctype="multipart/form-data" action="index.php?page=modules"><input type="hidden" name="csrf" value="'.e(tok()).'"><input type="hidden" name="action" value="upload"><label>Modulpaket (ZIP)<input type="file" name="package" accept=".zip,application/zip" required></label><small>Installiert eine neue Modul-ID oder aktualisiert ein Modul mit demselben slug.</small><button class="button">Paket prüfen und installieren</button></form></section>';
     if(!$modules)$body.='<section class="subpanel"><p class="muted">Noch keine Module installiert.</p></section>';
     foreach($modules as $module){
@@ -270,6 +354,13 @@ function moduleManager(PDO $pdo,string $globalPrefix,string $users,string $group
             $body.='<button class="button">Frontend-Auswahl speichern</button></form><div class="frontend-list"><strong>Frontends:</strong> ';
             foreach($fronts as $index=>$frontend)$body.=($index?', ':'').(int)$frontend['frontend_id'].' · '.e($frontend['name']);
             $body.='</div>';
+        }
+        if(is_file($moduleRoot.'/'.$module['slug'].'/dashboard.php')){
+            $stmt=$pdo->prepare("SELECT group_id,enabled FROM $dashboardPermissions WHERE module_id=?");$stmt->execute([$id]);$permissionRows=[];foreach($stmt->fetchAll() as $row)$permissionRows[(int)$row['group_id']]=(bool)$row['enabled'];
+            $body.='<section class="dashboard-permission"><div class="eyebrow">DASHBOARD-KACHEL</div><h3>Für welche Gruppen ist diese Kachel erlaubt?</h3><p class="muted">Neue Module sind für alle Gruppen zunächst deaktiviert. Ein Nutzer kann die Kachel nur auswählen, wenn mindestens eine seiner Gruppen sie hier freigeschaltet bekommen hat.</p>';
+            if(!$groupsList)$body.='<p class="muted">Es gibt noch keine Benutzergruppen. Ohne Gruppenzuordnung ist die Kachel für niemanden verfügbar.</p>';
+            else{$body.='<form method="post" action="index.php?page=modules"><input type="hidden" name="csrf" value="'.e(tok()).'"><input type="hidden" name="action" value="save_dashboard_permissions"><input type="hidden" name="module_id" value="'.$id.'"><div class="permission-grid">';foreach($groupsList as $group){$gid=(int)$group['id'];$body.='<label class="checkline"><input type="checkbox" name="dashboard_group['.$gid.']" value="1"'.(!empty($permissionRows[$gid])?' checked':'').'> '.e($group['name']).'</label>';}$body.='</div><button class="button">Dashboard-Freigaben speichern</button></form>';}
+            $body.='</section>';
         }
         $body.='</section>';
     }

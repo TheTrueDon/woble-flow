@@ -13,7 +13,7 @@ Login-Grundgerüst mit Installationsassistent, Profil, Benutzer- und Gruppenverw
 
 1. Datenbank und private/config.php sichern.
 2. Neue Anwendungsdateien hochladen, private/config.php beibehalten.
-3. Einmal die Seite aufrufen. Die Anwendung ergänzt die Datenbank automatisch um Gruppen-, Administrator- und Modulmanager-Tabellen.
+3. Einmal die Seite aufrufen. Die Anwendung ergänzt die Datenbank automatisch um Gruppen-, Administrator-, Modulmanager- und Dashboard-Tabellen.
 4. Für diesen ersten Aufruf benötigt das DB-Konto ALTER- und CREATE-Rechte. Nach erfolgreicher Migration können diese Rechte entzogen werden; der Modulmanager benötigt CREATE/ALTER/DROP nur, wenn Modul-Hooks Datenbanktabellen verwalten.
 
 Vorhandene Benutzerkonten und Passwörter bleiben erhalten. Falls noch kein Konto als Administrator markiert ist, wird das zuerst angelegte Konto zum Administrator.
@@ -23,6 +23,14 @@ Vorhandene Benutzerkonten und Passwörter bleiben erhalten. Falls noch kein Kont
 Administratoren öffnen links den Modulmanager und laden ein ZIP-Paket hoch. Ein Paket mit einem neuen slug wird installiert. Ein Paket mit bereits installiertem slug aktualisiert das Modul, wenn die Version höher ist. Zum Deinstallieren verwendet der Manager delete.php. Moduldateien werden in private/modules gespeichert und sind nicht direkt über den Webserver abrufbar.
 
 PHP-Module führen Servercode mit den Rechten der Anwendung aus. Installiere nur Pakete, deren Quelle und Code du vertraust.
+
+## Dashboard und Kachel-Freigaben
+
+Nach der Anmeldung öffnet sich das Dashboard. Module können optional eine `dashboard.php` im Paketstamm enthalten. Nur für diese Module wird im Modulmanager die Kachel-Freigabe je Benutzergruppe angezeigt. Neue Module sind für alle Gruppen zunächst deaktiviert. Der Admin kann die Freigabe später pro Gruppe per Häkchen einschalten.
+
+Ein Benutzer kann im Dashboard nur Kacheln auswählen, die mindestens eine seiner Gruppen freigeschaltet bekommen hat. Gehört er mehreren Gruppen an, genügt eine aktive Freigabe in einer dieser Gruppen. Beim ersten Dashboard-Aufruf werden alle verfügbaren Kacheln angezeigt; nach dem Speichern seiner persönlichen Auswahl erscheinen nur noch die ausgewählten Kacheln. Wird eine Kachel für alle Gruppen des Benutzers gesperrt, ist sie sofort nicht mehr auswählbar oder sichtbar. Die persönliche Auswahl wirkt nur auf das Dashboard. Modul-Frontends selbst bleiben gemäß der bestehenden Modulschnittstelle allen angemeldeten Benutzern zugänglich.
+
+`dashboard.php` wird serverseitig innerhalb einer Kachel eingebunden und erhält `$moduleContext` mit PDO, Tabellenpräfix, Benutzer, Modulordner und Asset-URL. Die Datei soll nur die Kachelinhalte ausgeben, kein vollständiges HTML-Dokument. Sie darf nicht direkt als öffentliche Datei erreichbar sein.
 
 ### Paketstruktur
 
